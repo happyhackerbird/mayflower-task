@@ -18,16 +18,6 @@ logger = logging.getLogger(__name__)
 # Fallback to default if not set
 ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-try:
-    llm = ChatOllama(model="anthropic/claude-3.5-sonnet", base_url=ollama_base_url)
-    # Test connection/model availability (optional but good practice)
-    # llm.invoke("Ping")
-    logger.info(f"ChatOllama initialized with model '{llm.model}' and base URL: {ollama_base_url}")
-except Exception as e:
-    logger.error(f"Failed to initialize ChatOllama: {e}. Ensure Ollama is running and the model is available.")
-    # Consider how to handle this - maybe raise an error or have a fallback?
-    llm = None # Set llm to None or raise an exception if initialization fails
-
 # Define the PoetAgentState type
 class PoetAgentState(TypedDict):
     location: str
@@ -43,225 +33,80 @@ class PoetAgentState(TypedDict):
 # --- Node Definitions ---
 
 def research_node(state: PoetAgentState) -> dict:
-    """Performs web research using an online Ollama model to find keywords.
+    """Performs web research AND drafts a poem using an online Ollama model.
 
-    Uses ChatOllama with the 'perplexity/llama-3.1-sonar-small-128k-online' model
-    to browse the web and find distinctive local food, drinks, landmarks,
-    and cultural features for the given location.
-    Updates the 'keywords' field in the state dictionary.
+    Uses ChatOllama with the 'perplexity/sonar' model
+    to browse the web for distinctive local features (food, drinks, landmarks, culture)
+    for the given location AND then drafts a short poem based on that research.
+    The poem should be in the dominant language of the location, have 2 stanzas
+    of 4 lines each, and adhere to a 30-character line limit.
+    Updates the 'draft_poem' field in the state dictionary.
 
     Args:
         state (dict): The current state dictionary, must contain 'location'.
 
     Returns:
-        dict: A dictionary containing 'keywords' list and optionally 'error_message'.
+        dict: A dictionary containing 'draft_poem' and optionally 'error_message'.
     """
     location = state.get("location")
     if not location:
         return {"error_message": "Location not provided for research."}
 
-    logger.info(f"Starting online research via Ollama for location: {location}")
-    keywords_to_update = []
+    logger.info(f"Starting online research & drafting via Ollama for location: {location}")
+    draft_poem_output = None
     error_msg = None
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
     try:
-        # Initialize ChatOllama specifically for the online research model
-        # Assumes OLLAMA_BASE_URL is set or defaults correctly
-        research_llm = ChatOllama(
-            model="perplexity/llama-3.1-sonar-large-128k-online",
-            base_url=ollama_base_url, # Use the same base URL
-            temperature=0.1 # Low temperature for factual extraction
+        # Initialize ChatOllama specifically for the online research/drafting model
+        research_draft_llm = ChatOllama(
+            model="perplexity/sonar",
+            base_url=ollama_base_url,
         )
 
-        # Define the prompt for the research model
-        # Instructs it to browse and extract specific types of keywords
+        # Define the combined prompt for research and drafting
         prompt_template = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert researcher tasked with finding specific, distinctive keywords about a location using your web browsing capabilities. Focus on local food specialities, unique local drinks or beverages, famous or characteristic landmarks/natural features, and notable cultural elements (like specific festivals, traditions, or famous local figures/art). Exclude generic terms. Search in the language of the location. Return ONLY the keywords, as a comma-separated list of 10-15. Example answer: keyword1, keyword2, keyword3"),
-            ("user", "Find keywords for the location: {location}.")
+            ("system", """
+You are a creative, concise, and culturally sensitive poet.
+
+Rules:
+1. Always answer ONLY with a poem, never with explanations, lists, or commentary.
+2. Use the dominant local language of the location (e.g., German for Germany).
+3. Structure: 2 stanzas, 4 lines per stanza.
+4. Each line must be under 30 characters.
+5. Choose a consistent rhyme scheme (AABB or ABAB).
+6. Incorporate specific local foods, drinks, landmarks, and cultural features based on the user's query.
+7. Never include a title, introduction, or any extra text—only the poem.
+"""),
+            ("user", "What are some famous local foods, drinks, landmarks, and cultural features of {location}? Answer ONLY in poem format, following the rules provided.")
         ])
 
-        # Simple chain: prompt -> LLM -> string output
-        chain = prompt_template | research_llm | StrOutputParser()
+        # Simple chain: prompt -> LLM -> string output (the draft poem)
+        chain = prompt_template | research_draft_llm | StrOutputParser()
 
-        logger.info(f'Querying Ollama model perplexity/llama-3.1-sonar-small-128k-online for: "{location}"')
-        raw_keywords_string = chain.invoke({"location": location})
-        print("raw_keywords_string:", raw_keywords_string)
+        logger.info(f'Querying Ollama model (research & draft) for: "{location}"')
+        draft_poem_output = chain.invoke({"location": location})
 
-        # --- Improved Parsing Logic --- 
-        if raw_keywords_string:
-            extracted_keywords = set()
-            
-            # 1. Try finding markdown list items
-            markdown_list_items = re.findall(r'^\s*[-*+]\s+(.*)', raw_keywords_string, re.MULTILINE)
-            for item in markdown_list_items:
-                clean_item = item.strip().lower()
-                if len(clean_item) > 2: # Basic length filter
-                    extracted_keywords.add(clean_item)
-            
-            # 2. Split by common delimiters and clean
-            potential_keywords = re.split(r'[\n,]+', raw_keywords_string)
-            for kw in potential_keywords:
-                # Strip punctuation first (like .) before cleaning/checking length
-                clean_kw = re.sub(r'[.!?]$', '', kw).strip().lower()
-                # Remove potential leading list markers if missed by regex
-                clean_kw = re.sub(r'^\s*[-*+]\s*', '', clean_kw)
-                
-                # Define location parts for broader filtering
-                location_parts = [part.strip().lower() for part in location.split(',')]
-                
-                # Filter out generic phrases, short words, broad locations, etc.
-                generic_phrases_to_exclude = [
-                    'keywords:', 'here is a list', 'based on', 'distinctive to',
-                    'local food', 'unique drinks', 'famous landmarks',
-                    'cultural elements', 'cultural festivals', 'notable landmarks',
-                    'feelgood restaurant', 'variety of'
-                ]
-                if (len(clean_kw) > 3 and 
-                    len(clean_kw) < 50 and # Avoid overly long strings
-                    clean_kw not in location_parts and # Exclude parts of the input location string
-                    not any(phrase in clean_kw for phrase in generic_phrases_to_exclude)
-                    and clean_kw not in ['and', 'or', 'the', 'for']): 
-                    extracted_keywords.add(clean_kw)
-
-            keywords_to_update = sorted(list(extracted_keywords))[:15] # Limit final list
-            logger.info(f"Extracted keywords (Ollama Online): {keywords_to_update}")
+        # Basic cleanup: remove potential leading/trailing whitespace
+        if draft_poem_output:
+            draft_poem_output = draft_poem_output.strip()
+            logger.info(f"""Draft poem received from Ollama:
+---
+{draft_poem_output}
+---""")
         else:
-            logger.warning(f"Ollama online model returned an empty response for {location}.")
-        # --- End of Improved Parsing --- 
+            logger.warning(f"Ollama online model returned an empty draft for {location}.")
+            error_msg = "Ollama returned an empty draft."
 
     except Exception as e:
-        logger.error(f"Error during Ollama online research for {location}: {e}", exc_info=True)
-        error_msg = f"Online research failed: {e}"
-        keywords_to_update = []
+        logger.error(f"Error during Ollama online research/drafting for {location}: {e}", exc_info=True)
+        error_msg = f"Online research/drafting failed: {e}"
+        draft_poem_output = None
 
-    return {"keywords": keywords_to_update, "error_message": error_msg}
+    # Return the draft poem, ready for validation
+    # Clear keywords as they are no longer generated here
+    return {"draft_poem": draft_poem_output, "keywords": [], "error_message": error_msg}
 
-# --- Drafting Node ---
-
-def drafting_node(state: PoetAgentState) -> dict:
-    """
-    Generates a draft poem using ChatOllama based on location and keywords.
-    """
-    location = state["location"]
-    keywords = state.get("keywords", []) # Use .get for safety
-    retry_count = state["retry_count"]
-    max_retries = state["max_retries"]
-    logger.info(f"---DRAFTING POEM (Attempt {retry_count + 1}/{max_retries}) FOR: {location}---")
-
-    keywords_str = ", ".join(keywords) if keywords else "no specific keywords provided"
-
-    # --- >>> NEW: Get detailed validation errors from previous step <<< ---
-    validation_errors = state.get("validation_errors")
-    logger.info(f"---DRAFTING POEM (Attempt {retry_count + 1}/{max_retries}) FOR: {location}---")
-
-    # --- >>> NEW: Construct retry instruction based on specific errors <<< ---
-    retry_instruction = "" # Default: no retry instruction needed for first attempt
-    if retry_count > 0 and validation_errors: # Check retry_count too
-        error_details = []
-        # Prioritize line length errors
-        length_errors = [e for e in validation_errors if e.get("type") == "line_length"]
-        if length_errors:
-            error_details.append("Your previous attempt had lines that were too long:")
-            for err in length_errors[:3]: # Limit feedback
-                error_details.append(
-                    f"  - Line {err.get('line_number', '?')} was {err.get('actual', '?')} chars (max 30): \"{err.get('content', '')[:40]}...\""
-                )
-            error_details.append("Please rewrite these lines to be 30 characters or less.")
-
-        # Add rhyme errors if present and limited/no length errors
-        rhyme_errors = [e for e in validation_errors if e.get("type") == "rhyme"]
-        if rhyme_errors and len(length_errors) < 2:
-             error_details.append("Also, some lines failed the ABAB rhyme scheme:")
-             for err in rhyme_errors[:2]: # Limit feedback
-                 lines = err.get('lines', ('?', '?'))
-                 words = err.get('words', ('?', '?'))
-                 error_details.append(
-                     f"  - Stanza {err.get('stanza', '?')}: Line {lines[0]} ('...{words[0]}') and Line {lines[1]} ('...{words[1]}') didn't rhyme well."
-                 )
-
-        # Add structure errors
-        structure_errors = [e for e in validation_errors if e.get("type") in ["line_count", "structure"]]
-        if structure_errors:
-             # Combine message for brevity
-             error_details.append("The overall structure (expected 8 lines in 2 stanzas) was also incorrect.")
-
-        if error_details:
-             retry_instruction = "\n**Feedback on Previous Attempt:**\n" + "\n".join(error_details) + "\nPlease correct these specific issues while following all original constraints."
-        else: # Fallback if errors exist but aren't parsed correctly
-            retry_instruction = "\n**Feedback on Previous Attempt:** The previous attempt failed validation. Please review all constraints carefully, especially the 30-character line limit and ABAB rhyme."
-    elif retry_count > 0:
-        # Fallback if validation_errors field was missing for some reason on a retry
-        retry_instruction = "\n**Feedback on Previous Attempt:** The previous attempt failed validation. Please review all constraints carefully, especially the 30-character line limit and ABAB rhyme."
-
-
-    # Construct the prompt dynamically
-    # Base prompt emphasizing constraints
-    prompt_template_str = """
-Generate a humorous, 2-stanza poem about {location}.
-
-**Follow these steps carefully:**
-1.  **Draft Initial Poem:** Write 2 stanzas (4 lines each, 8 total) with an ABAB rhyme scheme, trying to use these keywords: {keywords_str}.
-2.  **Self-Correction (CRITICAL):** Review EACH line of your draft internally.
-    *   **CHECK LINE LENGTH:** Ensure EVERY line is **30 characters or less**. This is the **MOST IMPORTANT** rule.
-    *   **REWRITE IF NEEDED:** If any line exceeds 30 characters, REWRITE IT to be 30 characters or less while preserving meaning and rhyme if possible. Repeat until all lines conform.
-    *   **CHECK RHYME/STANZAS:** Briefly confirm ABAB rhyme and 2 stanzas of 4 lines remain.
-3.  **Final Output:** Provide ONLY the corrected poem text.
-
-**Constraints Summary (Apply during Self-Correction):**
-*   **MAXIMUM LINE LENGTH: 30 CHARACTERS. NO EXCEPTIONS.**
-*   Exactly 2 stanzas, 4 lines each (8 lines total).
-*   ABAB rhyme scheme per stanza.
-
-**Example ABAB structure (lines ≤ 30 chars):**
-A: The stars align above (16 chars)
-B: Their light cuts like knives (17 chars)
-A: A dance of cosmic love (17 chars)
-B: It writes our fleeting lives (18 chars)
-
-{retry_instruction} # Note: This placeholder gets filled dynamically now
-
-**IMPORTANT:** Output ONLY the final, corrected poem text, line by line. Do NOT include your internal thought process, "A:", "B:", character counts, or any other conversational text or explanations.
-"""
-
-    prompt = ChatPromptTemplate.from_template(prompt_template_str)
-    output_parser = StrOutputParser()
-
-    # Create the generation chain
-    chain = prompt | llm | output_parser
-
-    draft_poem = None
-    error_msg = None
-    try:
-        logger.info(f"Generating draft with keywords: {keywords_str}")
-        # Add prompt details to log for easier debugging
-        logger.debug(f"Prompt passed to LLM:\n{prompt.format(location=location, keywords_str=keywords_str, retry_instruction=retry_instruction)}")
-        draft_poem = chain.invoke({
-            "location": location,
-            "keywords_str": keywords_str,
-            "retry_instruction": retry_instruction
-        })
-        # Basic cleanup: remove leading/trailing whitespace
-        draft_poem = draft_poem.strip() if draft_poem else None
-        logger.info(f"Draft poem generated:\n---\n{draft_poem}\n---")
-
-        print(f"\n--- Attempt {state['retry_count'] + 1} Draft ---")
-        print(draft_poem if draft_poem else "No poem generated.")
-        print("----------------------\n")
-
-    except Exception as e:
-        logger.error(f"Error during poem drafting for {location}: {e}")
-        error_msg = f"Drafting failed: {e}"
-        print(f"\n--- Attempt {state['retry_count'] + 1} FAILED ---")
-        print(f"Error: {e}")
-        print("------------------------\n")
-
-    # Return the partial state update, incrementing retry_count
-    return {
-        "draft_poem": draft_poem,
-        "error_message": error_msg,
-        "retry_count": retry_count + 1,
-        "validation_passed": False # Reset validation status for the new draft
-    }
 
 # --- Helper Function using rhyming_part ---
 def check_rhyme_via_part(word1: Optional[str], word2: Optional[str]) -> bool:
@@ -314,12 +159,13 @@ def validation_node(state: PoetAgentState) -> dict:
     """
     Validates the draft poem against constraints (line length, rhyme scheme).
     Updates 'validation_passed', 'validated_poem', and 'error_message'.
+    Increments 'retry_count' if validation fails.
     """
     draft_poem = state.get("draft_poem")
-    retry_count = state["retry_count"]
-    max_retries = state["max_retries"]
-    location = state["location"]
-    logger.info(f"---VALIDATING POEM (Attempt {retry_count}/{max_retries}) FOR: {location}---")
+    location = state.get("location") # Used for logging
+    current_retry = state.get("retry_count", 0)
+    max_retries_allowed = state.get("max_retries", 3)
+    logger.info(f"---VALIDATING POEM (Attempt {current_retry}/{max_retries_allowed}) FOR: {location}---")
     validation_passed = True
     error_messages = []
     detailed_errors = []
@@ -331,6 +177,7 @@ def validation_node(state: PoetAgentState) -> dict:
             "error_message": "No draft poem provided for validation.",
             "validated_poem": None,
             "validation_errors": [{"type": "missing_draft", "message": "No draft poem"}],
+            "retry_count": current_retry + 1
         }
 
     lines = [line.strip() for line in draft_poem.strip().split('\n') if line.strip()]
@@ -437,26 +284,28 @@ def validation_node(state: PoetAgentState) -> dict:
         final_error_message = "Validation FAILED:\n" + "\n".join([f"- {e}" for e in error_messages])
         logger.warning(final_error_message)
         # Log retry/fail status
-        if state['retry_count'] < state['max_retries']:
-            logger.warning(f"---VALIDATION FAILED - RETRYING DRAFT ({state['retry_count']}/{state['max_retries']})---")
+        if current_retry < max_retries_allowed:
+            logger.warning(f"---VALIDATION FAILED - RETRYING DRAFT ({current_retry}/{max_retries_allowed})---")
         else:
-            logger.error(f"---VALIDATION FAILED - MAX RETRIES ({state['retry_count']}) REACHED - FINISHING WITH ERROR---")
+            logger.error(f"---VALIDATION FAILED - MAX RETRIES ({max_retries_allowed}) REACHED - FINISHING WITH ERROR---")
     else:
         logger.info("---VALIDATION PASSED---")
 
+    # Return updated state
     return {
+        "validated_poem": draft_poem if validation_passed else None,
         "validation_passed": validation_passed,
         "error_message": final_error_message,
-        "validated_poem": draft_poem if validation_passed else None,
-        "validation_errors": detailed_errors if not validation_passed else None
+        "validation_errors": detailed_errors,
+        # IMPORTANT: Increment retry_count if validation failed
+        "retry_count": current_retry + (1 if not validation_passed else 0)
     }
 
 # --- Conditional Edge Logic ---
 
 def should_retry_drafting(state: PoetAgentState) -> str:
-    """
-    Determines the next step after validation.
-    Returns 'draft_poem_node' to retry or END if validation passed or max retries reached.
+    """Determines the next step after validation.
+    Returns 'retry' to retry or 'end' if validation passed or max retries reached.
     """
     validation_passed = state["validation_passed"]
     retry_count = state["retry_count"]
@@ -465,14 +314,13 @@ def should_retry_drafting(state: PoetAgentState) -> str:
 
     if validation_passed:
         logger.info("---VALIDATION PASSED - FINISHING---")
-        return END
+        return "end"
     elif retry_count < max_retries:
         logger.warning(f"---VALIDATION FAILED - RETRYING DRAFT ({retry_count}/{max_retries})---")
-        return "draft_poem_node" # Name of the node to loop back to
+        return "retry"
     else:
         logger.error(f"---VALIDATION FAILED - MAX RETRIES ({max_retries}) REACHED - FINISHING WITH ERROR---")
-        # Keep the last error message in the state
-        return END
+        return "end"
 
 # --- Build the Graph ---
 
@@ -480,22 +328,20 @@ def should_retry_drafting(state: PoetAgentState) -> str:
 workflow = StateGraph(PoetAgentState)
 
 # Add nodes
-workflow.add_node("research_keywords", research_node)
-workflow.add_node("draft_poem_node", drafting_node)
-workflow.add_node("validate_poem", validation_node)
+workflow.add_node("research_node", research_node)
+workflow.add_node("validation_node", validation_node)
 
 # Define edges
-workflow.set_entry_point("research_keywords")
-workflow.add_edge("research_keywords", "draft_poem_node")
-workflow.add_edge("draft_poem_node", "validate_poem")
+workflow.set_entry_point("research_node")
+workflow.add_edge("research_node", "validation_node")
 
 # Add conditional edge from validation
 workflow.add_conditional_edges(
-    "validate_poem",          # Source node
-    should_retry_drafting,    # Function to decide the next node
+    "validation_node",
+    should_retry_drafting,
     {
-        "draft_poem_node": "draft_poem_node", # If function returns "draft_poem_node", go to drafting_node
-        END: END                   # If function returns END, finish execution
+        "retry": "research_node",
+        "end": END
     }
 )
 
@@ -505,7 +351,7 @@ poet_agent_graph = workflow.compile()
 logger.info("Poet Agent graph compiled successfully.")
 
 # --- Optional: Function to invoke the graph ---
-def run_poet_agent(location: str, max_retries: int = 3) -> PoetAgentState:
+def run_poet_agent(location: str, max_retries: int = 5) -> PoetAgentState:
     """Runs the compiled poet agent graph for a given location."""
     logger.info(f"---STARTING POET AGENT RUN FOR: {location}---")
     initial_state: PoetAgentState = {
