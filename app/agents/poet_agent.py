@@ -1,6 +1,5 @@
 from typing import TypedDict, List, Optional
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_ollama.chat_models import ChatOllama
+from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 import logging
@@ -13,21 +12,21 @@ import pronouncing # Use pronouncing for rhyme checks
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Initialize tools
-search_tool = DuckDuckGoSearchRun()
-
 # Initialize LLM (ChatOllama)
 # Assumes Ollama is running and accessible.
 # Set OLLAMA_BASE_URL in .env if not default (http://localhost:11434)
-# Model name 'llama3' taken from Task 2 details. Adjust if needed.
+# Fallback to default if not set
+ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
 try:
-    llm = ChatOllama(model="anthropic/claude-3.5-sonnet", base_url=os.getenv("OLLAMA_BASE_URL"))
-    logger.info(f"ChatOllama initialized with model 'anthropic/claude-3.5-sonnet' and base URL: {os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}")
+    llm = ChatOllama(model="anthropic/claude-3.5-sonnet", base_url=ollama_base_url)
+    # Test connection/model availability (optional but good practice)
+    # llm.invoke("Ping")
+    logger.info(f"ChatOllama initialized with model '{llm.model}' and base URL: {ollama_base_url}")
 except Exception as e:
     logger.error(f"Failed to initialize ChatOllama: {e}. Ensure Ollama is running and the model is available.")
     # Consider how to handle this - maybe raise an error or have a fallback?
-    # For now, we'll let it raise if it fails here.
-    raise
+    llm = None # Set llm to None or raise an exception if initialization fails
 
 # Define the PoetAgentState type
 class PoetAgentState(TypedDict):
@@ -44,78 +43,95 @@ class PoetAgentState(TypedDict):
 # --- Node Definitions ---
 
 def research_node(state: PoetAgentState) -> dict:
-    """Performs web search for keywords related to the location.
+    """Performs web research using an online Ollama model to find keywords.
 
-    Uses DuckDuckGo search to find relevant information based on the location
-    and then extracts potential entities using regex patterns.
+    Uses ChatOllama with the 'perplexity/llama-3.1-sonar-small-128k-online' model
+    to browse the web and find distinctive local food, drinks, landmarks,
+    and cultural features for the given location.
     Updates the 'keywords' field in the state dictionary.
 
     Args:
         state (dict): The current state dictionary, must contain 'location'.
 
     Returns:
-        dict: Updated state dictionary with 'keywords' and optionally 'error_message'.
+        dict: A dictionary containing 'keywords' list and optionally 'error_message'.
     """
     location = state.get("location")
     if not location:
         return {"error_message": "Location not provided for research."}
 
-    logger.info(f"Starting research for location: {location}")
+    logger.info(f"Starting online research via Ollama for location: {location}")
     keywords_to_update = []
     error_msg = None
 
-    # Construct search query
-    search_query = f"distinctive local food, drinks, famous landmarks or features of {location}"
-    logger.info(f'Running search query: "{search_query}"')
-
     try:
-        search = DuckDuckGoSearchRun(max_results=1) # Keep max_results low for snippet focus
-        search_results_raw = search.invoke(search_query)
+        # Initialize ChatOllama specifically for the online research model
+        # Assumes OLLAMA_BASE_URL is set or defaults correctly
+        research_llm = ChatOllama(
+            model="perplexity/llama-3.1-sonar-large-128k-online",
+            base_url=ollama_base_url, # Use the same base URL
+            temperature=0.1 # Low temperature for factual extraction
+        )
 
-        # Extract relevant text snippet
-        if isinstance(search_results_raw, str):
-            search_results = search_results_raw[:500] # Limit text length for processing
+        # Define the prompt for the research model
+        # Instructs it to browse and extract specific types of keywords
+        prompt_template = ChatPromptTemplate.from_messages([
+            ("system", "You are an expert researcher tasked with finding specific, distinctive keywords about a location using your web browsing capabilities. Focus on local food specialities, unique local drinks or beverages, famous or characteristic landmarks/natural features, and notable cultural elements (like specific festivals, traditions, or famous local figures/art). Exclude generic terms. Search in the language of the location. Return ONLY the keywords, as a comma-separated list of 10-15. Example answer: keyword1, keyword2, keyword3"),
+            ("user", "Find keywords for the location: {location}.")
+        ])
+
+        # Simple chain: prompt -> LLM -> string output
+        chain = prompt_template | research_llm | StrOutputParser()
+
+        logger.info(f'Querying Ollama model perplexity/llama-3.1-sonar-small-128k-online for: "{location}"')
+        raw_keywords_string = chain.invoke({"location": location})
+        print("raw_keywords_string:", raw_keywords_string)
+
+        # --- Improved Parsing Logic --- 
+        if raw_keywords_string:
+            extracted_keywords = set()
+            
+            # 1. Try finding markdown list items
+            markdown_list_items = re.findall(r'^\s*[-*+]\s+(.*)', raw_keywords_string, re.MULTILINE)
+            for item in markdown_list_items:
+                clean_item = item.strip().lower()
+                if len(clean_item) > 2: # Basic length filter
+                    extracted_keywords.add(clean_item)
+            
+            # 2. Split by common delimiters and clean
+            potential_keywords = re.split(r'[\n,]+', raw_keywords_string)
+            for kw in potential_keywords:
+                # Strip punctuation first (like .) before cleaning/checking length
+                clean_kw = re.sub(r'[.!?]$', '', kw).strip().lower()
+                # Remove potential leading list markers if missed by regex
+                clean_kw = re.sub(r'^\s*[-*+]\s*', '', clean_kw)
+                
+                # Define location parts for broader filtering
+                location_parts = [part.strip().lower() for part in location.split(',')]
+                
+                # Filter out generic phrases, short words, broad locations, etc.
+                generic_phrases_to_exclude = [
+                    'keywords:', 'here is a list', 'based on', 'distinctive to',
+                    'local food', 'unique drinks', 'famous landmarks',
+                    'cultural elements', 'cultural festivals', 'notable landmarks',
+                    'feelgood restaurant', 'variety of'
+                ]
+                if (len(clean_kw) > 3 and 
+                    len(clean_kw) < 50 and # Avoid overly long strings
+                    clean_kw not in location_parts and # Exclude parts of the input location string
+                    not any(phrase in clean_kw for phrase in generic_phrases_to_exclude)
+                    and clean_kw not in ['and', 'or', 'the', 'for']): 
+                    extracted_keywords.add(clean_kw)
+
+            keywords_to_update = sorted(list(extracted_keywords))[:15] # Limit final list
+            logger.info(f"Extracted keywords (Ollama Online): {keywords_to_update}")
         else:
-            search_results = str(search_results_raw)[:500]
-
-        logger.info(f"Search results snippet: {search_results[:100]}...")
-
-        # --- Regex-based entity extraction (per user request) ---
-        entity_patterns = [
-            r'\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b',  # Proper nouns (CamelCase chains)
-            r'"(.*?)"',                           # Quoted phrases
-            r'\b\w+ of \w+\b'                    # "X of Y" patterns
-        ]
-
-        extracted = set()
-        for pattern in entity_patterns:
-            try:
-                matches = re.findall(pattern, search_results)
-                for match in matches:
-                    # Handle capture groups from quoted phrases pattern
-                    if isinstance(match, tuple) and pattern == r'"(.*?)"':
-                        match = match[0]
-                    elif not isinstance(match, str):
-                        continue # Skip non-string matches
-
-                    # Basic cleaning: remove non-alpha, lowercase, strip
-                    clean = re.sub(r'[^a-zA-Z\s]', '', match).strip().lower()
-
-                    # Filter: reasonable length, not just numbers, not common words (optional)
-                    if len(clean) >= 4 and not clean.isnumeric() and clean not in ["welcome", "discover", "from", "with"]:
-                        extracted.add(clean)
-            except re.error as re_err:
-                logger.warning(f"Regex error with pattern '{pattern}': {re_err}")
-                continue # Skip problematic pattern
-
-        keywords_to_update = sorted(list(extracted))[:15] # Limit keywords after sorting
-        # --- End of Regex Extraction ---
-
-        logger.info(f"Extracted keywords (Regex): {keywords_to_update}")
+            logger.warning(f"Ollama online model returned an empty response for {location}.")
+        # --- End of Improved Parsing --- 
 
     except Exception as e:
-        logger.error(f"Error during research for {location}: {e}", exc_info=True)
-        error_msg = f"Research failed: {e}"
+        logger.error(f"Error during Ollama online research for {location}: {e}", exc_info=True)
+        error_msg = f"Online research failed: {e}"
         keywords_to_update = []
 
     return {"keywords": keywords_to_update, "error_message": error_msg}
@@ -511,7 +527,7 @@ def run_poet_agent(location: str, max_retries: int = 3) -> PoetAgentState:
 
 # Example usage (for testing)
 if __name__ == "__main__":
-    test_location = "San Francisco, CA"
+    test_location = "Quirnheim, Deutschland"
     print(f"\nTesting Poet Agent for: {test_location}\n")
     final_state_output = run_poet_agent(test_location)
     print("\n--- Final Output ---")
