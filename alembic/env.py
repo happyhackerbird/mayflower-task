@@ -9,7 +9,8 @@ sys.path.insert(0, str(project_root))
 
 # Import SQLModel and load .env
 from dotenv import load_dotenv
-from app.models import SQLModel # Assumes models.py defines SQLModel base or imports it
+from sqlmodel import SQLModel # Import directly from sqlmodel
+from app.models import * # Import app models to ensure they are registered with metadata
 
 load_dotenv()
 

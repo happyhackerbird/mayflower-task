@@ -8,7 +8,7 @@ class AddressBase(SQLModel):
     state: str
     zip: str
     country: str = Field(index=True)
-    location_key: str = Field(index=True, unique=True, description="Composite key like city|state|country") # Make unique
+    location_key: str = Field(index=True, description="Composite key like city|state|country") # Not unique here
 
 # Database model, inherits from Base
 class Address(AddressBase, table=True):
@@ -34,8 +34,12 @@ class AddressPublic(AddressBase):
     poem_text: Optional[str] = None # Include poem text directly
 
 # Properties to receive on creation
-class AddressCreate(AddressBase):
-    pass
+class AddressCreate(SQLModel):
+    street: str
+    city: str
+    state: str
+    zip: str
+    country: str
 
 # Properties to receive on update
 class AddressUpdate(SQLModel):
