@@ -42,6 +42,8 @@ SUPPORTED_RHYME_LANGUAGES = {'cs', 'de', 'en', 'es', 'fr', 'nl', 'ru'}
 COUNTRY_TO_LANGUAGE_MAP = {
     "Czech Republic": {"code": "cs", "name": "Czech"},
     "Germany": {"code": "de", "name": "German"},
+    "Austria": {"code": "de", "name": "German"},
+    "Switzerland": {"code": "de", "name": "German"},
     "Spain": {"code": "es", "name": "Spanish"},
     "France": {"code": "fr", "name": "French"},
     "Netherlands": {"code": "nl", "name": "Dutch"},
@@ -439,7 +441,7 @@ poet_agent_graph = workflow.compile()
 logger.info("Poet Agent graph compiled successfully.")
 
 # --- Optional: Function to invoke the graph ---
-def run_poet_agent(location: str, max_retries: int = 3) -> PoetAgentState:
+def run_poet_agent(location: str, max_retries: int = 7) -> PoetAgentState:
     """Runs the compiled poet agent graph for a given location."""
     logger.info(f"---STARTING POET AGENT RUN FOR: {location}---")
     initial_state: PoetAgentState = {

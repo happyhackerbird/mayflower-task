@@ -18,39 +18,42 @@ async def create_address_endpoint(
 ):
     """
     Create new address. The CRUD layer handles geocoding and 
-    finding/generating the associated poem.
+    finding/generating the associated poem, handling poem errors gracefully.
     """
     try:
-        # Call the CRUD function which handles all the logic
-        # Note: crud.address.create_address MUST be async if it uses await internally (like for geocoding)
+        # Call the CRUD function which handles all the logic including poem errors
         db_address = await crud.address.create_address(db=db, address_in=address_in)
         if not db_address:
-             # Should not happen if CRUD handles errors, but as a safeguard
-             raise HTTPException(status_code=500, detail="Address creation failed in CRUD layer.")
+             raise HTTPException(status_code=500, detail="Address creation failed unexpectedly in CRUD layer.")
 
         # --- Prepare Response --- 
-        # Fetch the associated poem text using the ID from the created address
-        poem_text = None
+        poem_text = None # Default to None
         if db_address.poem_id:
+            # If poem_id exists, try to fetch the poem text
             db_poem = crud.poem.get_poem(db=db, id=db_address.poem_id)
             if db_poem:
                 poem_text = db_poem.text
             else:
-                 # This case (poem_id exists but poem not found) indicates a data integrity issue
-                 # Log this occurrence
-                 print(f"Warning: Address {db_address.id} has poem_id {db_address.poem_id}, but Poem not found in DB.")
+                 # Log if linked poem not found (data integrity issue)
+                 print(f"Warning: Address {db_address.id} has poem_id {db_address.poem_id}, but Poem not found.")
+        else:
+            # If poem_id is None, it means poem generation failed (or was skipped)
+            # We can optionally set a specific message here instead of just None
+            poem_text = "Poem generation failed or skipped." # Optional placeholder message
 
         # Use model_validate with update to include poem_text
         address_public = models.AddressPublic.model_validate(db_address, update={'poem_text': poem_text})
         return address_public
 
-    except ValueError as e:
-        # Catch potential errors raised from CRUD layer (e.g., geocoding, poem generation failure)
-        raise HTTPException(status_code=400, detail=str(e))
+    # Removed specific ValueError handler, as CRUD now handles it internally.
+    # Catch other potential exceptions (e.g., DB connection issues, unexpected errors in CRUD)
+    except HTTPException as e:
+         # Re-raise HTTPExceptions raised by geocoding
+         raise e
     except Exception as e:
-        # Catch unexpected errors
-        print(f"Unexpected error creating address: {e}") # Log the error
-        raise HTTPException(status_code=500, detail="An unexpected error occurred during address creation.")
+        # Catch unexpected errors during the CRUD call or response preparation
+        print(f"Unexpected error processing create address request: {e}") 
+        raise HTTPException(status_code=500, detail="An unexpected error occurred processing the request.")
 
 
 @router.get("/{address_id}", response_model=models.AddressPublic)

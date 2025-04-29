@@ -3,37 +3,52 @@ from typing import List, Optional, Any
 from sqlmodel import Session, select
 
 from app.models import Address, AddressCreate, AddressUpdate
+from app.services.geoapify_client import StandardizedAddress
 from app.services.geoapify_client import geocode_address
 from app.crud import poem as crud_poem
 
 async def create_address(db: Session, address_in: AddressCreate) -> Address:
-    """Create a new address after geocoding and finding/creating its poem."""
-    # 1. Geocode the input address
-    standardized_address_data = await geocode_address(
+    """Create a new address after geocoding and finding/creating its poem.
+    Handles poem generation errors gracefully by creating the address without a linked poem.
+    """
+    # 1. Geocode the input address (raises HTTPException on failure)
+    standardized_address_data: StandardizedAddress = await geocode_address(
         street=address_in.street,
         city=address_in.city,
         state=address_in.state,
         zip_code=address_in.zip,
         country=address_in.country
     )
-    # geocode_address raises HTTPException on failure, so we assume success here
     assert standardized_address_data is not None
 
-    # 2. Determine location key
-    city = standardized_address_data['city'].lower()
-    country = standardized_address_data['country'].lower()
-    location_key = f"{city}|{country}"
+    location_key = standardized_address_data.location_key
+    associated_poem_id: Optional[int] = None # Initialize poem_id as None
 
-    # 3. Find or create the corresponding poem
-    associated_poem = crud_poem.find_or_create_poem(db=db, location_key=location_key)
+    # 3. Try to find or create the corresponding poem
+    try:
+        associated_poem = crud_poem.find_or_create_poem(db=db, location_key=location_key)
+        associated_poem_id = associated_poem.id # Assign ID if successful
+    except ValueError as e:
+        # Log the poem generation failure but don't stop address creation
+        print(f"Warning: Poem generation/finding failed for {location_key}: {e}")
+        # associated_poem_id remains None
+    except Exception as e:
+        # Log unexpected errors during poem step but still try to create address
+        print(f"Warning: Unexpected error during poem step for {location_key}: {e}")
+        # associated_poem_id remains None
 
-    # 4. Create the Address record with standardized data and poem link
-    # Use **standardized_address_data to populate fields directly
-    db_address = Address(
-        **standardized_address_data, # street, city, state, zip, country
-        location_key=location_key,
-        poem_id=associated_poem.id
-    )
+    # 4. Create the Address record with standardized data and potentially null poem link
+    address_dict_for_creation = {
+        "street": standardized_address_data.street,
+        "city": standardized_address_data.city,
+        "state": standardized_address_data.state,
+        "zip": standardized_address_data.zip,
+        "country": standardized_address_data.country,
+        "location_key": location_key,
+        "poem_id": associated_poem_id # Use the ID (or None if poem failed)
+    }
+
+    db_address = Address(**address_dict_for_creation)
     db.add(db_address)
     db.commit()
     db.refresh(db_address)
@@ -61,38 +76,50 @@ async def update_address(db: Session, db_obj: Address, obj_in: AddressUpdate) ->
     potential_new_data = db_obj.model_dump() # Start with current data
     potential_new_data.update(update_data) # Apply changes
 
-    if 'city' in update_data or 'country' in update_data:
+    # Check if location-defining fields have actually changed
+    if (('city' in update_data and update_data['city'] != db_obj.city) or 
+        ('state' in update_data and update_data['state'] != db_obj.state) or 
+        ('country' in update_data and update_data['country'] != db_obj.country)):
         needs_regeocode = True
 
     new_poem_id = db_obj.poem_id
     new_location_key = db_obj.location_key
-    standardized_update_data = update_data # Start with direct updates
+    standardized_update_data_dict = update_data # Start with direct updates
 
     if needs_regeocode:
-        # Re-geocode with potentially updated city/country
-        standardized_address_data = await geocode_address(
+        # Re-geocode with potentially updated city/country/state
+        # Use data from potential_new_data which includes the updates
+        standardized_address_result: StandardizedAddress = await geocode_address(
             street=potential_new_data['street'],
             city=potential_new_data['city'],
             state=potential_new_data['state'],
             zip_code=potential_new_data['zip'],
             country=potential_new_data['country']
         )
-        assert standardized_address_data is not None
+        assert standardized_address_result is not None
 
         # Determine new location key and find/create poem
-        city = standardized_address_data['city'].lower()
-        country = standardized_address_data['country'].lower()
-        new_location_key = f"{city}|{country}"
+        new_location_key = standardized_address_result.location_key
         associated_poem = crud_poem.find_or_create_poem(db=db, location_key=new_location_key)
         new_poem_id = associated_poem.id
-        # Use standardized data for the update
-        standardized_update_data = standardized_address_data
+        
+        # Use standardized data for the update dict, mapping fields correctly
+        standardized_update_data_dict = {
+            "street": standardized_address_result.street,
+            "city": standardized_address_result.city,
+            "state": standardized_address_result.state,
+            "zip": standardized_address_result.zip,
+            "country": standardized_address_result.country,
+            # Don't include location_key/poem_id here, set them separately below
+        }
     
-    # Update the database object fields
-    for field, value in standardized_update_data.items():
-        setattr(db_obj, field, value)
+    # Update the database object fields using the prepared dict
+    for field, value in standardized_update_data_dict.items():
+        # Only update if the field exists in the dict (handles partial updates too)
+        if value is not None: # Check if value is provided in update
+             setattr(db_obj, field, value)
     
-    # Update location_key and poem_id if they changed
+    # Update location_key and poem_id if re-geocoding occurred
     if needs_regeocode:
         setattr(db_obj, 'location_key', new_location_key)
         setattr(db_obj, 'poem_id', new_poem_id)
