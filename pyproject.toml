@@ -22,6 +22,28 @@ dependencies = [
     "pydantic-settings (>=2.9.1,<3.0.0)",
 ]
 
+[tool.poetry]
+name = "mayflower-task"
+version = "0.1.0"
+description = "a state-of-the-art web service based on common libraries. It is an address service withbuilt-in lyric functionality. You can create and query addresses. A funny poem is automatically created based on the addressabout their place of residence and local eating and drinking habits. If there is already a poem for the place of residence by oneIf another entry was created, this will be delivered, otherwise a new one will be created. So there is only one poem per location.The poem should contain cross rhymes and each line should be a maximum of 30 characters long.The addresses entered in this way (including the poem) can be created, queried, changed and deleted." # Copy/paste your actual description if different
+authors = ["Lilly <lg1527058@gmail.com>"] # Format: "Your Name <your@email.com>"
+readme = "README.md"
+packages = [{include = "app"}] # Tell poetry where your main application code is
+
+[tool.poetry.dependencies]
+python = ">=3.12,<4.0"
+fastapi = ">=0.115.12,<0.116.0" # Copied from [project]
+uvicorn = ">=0.34.2,<0.35.0"
+python-dotenv = ">=1.1.0,<2.0.0"
+psycopg2-binary = ">=2.9.10,<3.0.0"
+langgraph = ">=0.3.31,<0.4.0"
+langchain = ">=0.3.23,<0.4.0"
+langchain-ollama = ">=0.3.2,<0.4.0"
+sqlmodel = ">=0.0.24,<0.0.25"
+langchain-community = ">=0.3.21,<0.4.0"
+rhymetagger = ">=0.2.9,<0.3.0"
+httpx = ">=0.28.1,<0.29.0"
+pydantic-settings = ">=2.9.1,<3.0.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -37,3 +59,4 @@ alembic = "^1.15.2"
 pytest = "^8.3.5"
 pytest-asyncio = "^0.26.0"
 python-dotenv = "^1.0.1" # Add dotenv for loading .env in tests
+uvicorn = {extras = ["standard"], version = ">=0.34.2,<0.35.0"}
