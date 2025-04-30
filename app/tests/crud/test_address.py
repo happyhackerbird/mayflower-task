@@ -4,6 +4,7 @@ from sqlmodel import Session, select
 
 from app import crud
 from app.models import AddressCreate, AddressUpdate, Poem, Address
+from app.services.geoapify_client import StandardizedAddress
 
 # TODO: Add tests for create_address, get_addresses, update_address, remove_address
 
@@ -21,12 +22,11 @@ async def test_get_address(mock_find_or_create_poem: MagicMock, mock_geocode_add
         street="456 Oak Ave", city="Getville", state="GS", zip="67890", country="Getland"
     )
     # Mock dependencies for creation
-    mock_standardized_data = {
-        "street": "456 Standard Oak Ave", "city": "Getville", "state": "GS", 
-        "zip": "67890", "country": "Getland"
-    }
-    # Define location_key before using it in the f-string
     location_key = "getville|getland"
+    mock_standardized_data = StandardizedAddress(
+        street="456 Standard Oak Ave", city="Getville", state="GS", 
+        postcode="67890", country="Getland", location_key=location_key
+    )
     mock_poem_obj = create_mock_poem(id=2, location_key=location_key, text=f"Mock poem for {location_key}")
     mock_geocode_address.return_value = mock_standardized_data
     mock_find_or_create_poem.return_value = mock_poem_obj
@@ -41,9 +41,9 @@ async def test_get_address(mock_find_or_create_poem: MagicMock, mock_geocode_add
     assert retrieved_address is not None
     assert retrieved_address.id == created_address.id
     # Check standardized data persists
-    assert retrieved_address.street == mock_standardized_data["street"]
-    assert retrieved_address.city == mock_standardized_data["city"]
-    assert retrieved_address.location_key == "getville|getland"
+    assert retrieved_address.street == mock_standardized_data.street
+    assert retrieved_address.city == mock_standardized_data.city
+    assert retrieved_address.location_key == mock_standardized_data.location_key
     assert retrieved_address.poem_id == mock_poem_obj.id
     
     # Test retrieving non-existent ID
@@ -61,9 +61,14 @@ async def test_get_addresses(mock_find_or_create_poem: MagicMock, mock_geocode_a
     addr2_in = AddressCreate(street="101 Maple Dr", city="Listville", state="LS", zip="11224", country="Listland")
 
     # Mock dependencies (same poem for both for simplicity here)
-    mock_standardized_data1 = {"street": "789 Std Pine", "city": "Listville", "state": "LS", "zip": "11223", "country": "Listland"}
-    mock_standardized_data2 = {"street": "101 Std Maple", "city": "Listville", "state": "LS", "zip": "11224", "country": "Listland"}
-    mock_poem_obj = create_mock_poem(id=3, location_key="listville|listland", text="Mock poem for listville|listland")
+    location_key = "listville|listland"
+    mock_standardized_data1 = StandardizedAddress(
+        street="789 Std Pine", city="Listville", state="LS", postcode="11223", country="Listland", location_key=location_key
+    )
+    mock_standardized_data2 = StandardizedAddress(
+        street="101 Std Maple", city="Listville", state="LS", postcode="11224", country="Listland", location_key=location_key
+    )
+    mock_poem_obj = create_mock_poem(id=3, location_key=location_key, text=f"Mock poem for {location_key}")
 
     # Mock calls for first address
     mock_geocode_address.return_value = mock_standardized_data1
@@ -107,11 +112,12 @@ async def test_update_address(mock_find_or_create_poem: MagicMock, mock_geocode_
         street="321 Cedar Blvd", city="Updateville", state="US", zip="54321", country="Updateland"
     )
     # Mock dependencies for creation
-    mock_standardized_data_orig = {
-        "street": "321 Std Cedar Blvd", "city": "Updateville", "state": "US", 
-        "zip": "54321", "country": "Updateland"
-    }
-    mock_poem_orig = create_mock_poem(id=4, location_key="updateville|updateland", text="Original poem for updateville|updateland")
+    location_key = "updateville|updateland"
+    mock_standardized_data_orig = StandardizedAddress(
+        street="321 Std Cedar Blvd", city="Updateville", state="US", 
+        postcode="54321", country="Updateland", location_key=location_key
+    )
+    mock_poem_orig = create_mock_poem(id=4, location_key=location_key, text=f"Original poem for {location_key}")
     mock_geocode_address.return_value = mock_standardized_data_orig
     mock_find_or_create_poem.return_value = mock_poem_orig
     created_address = await crud.address.create_address(db=db, address_in=address_in)
@@ -138,11 +144,11 @@ async def test_update_address(mock_find_or_create_poem: MagicMock, mock_geocode_
     assert updated_address is not None
     assert updated_address.id == created_address.id
     assert updated_address.street == update_data.street # Updated field
-    assert updated_address.city == mock_standardized_data_orig["city"] # Original standardized
-    assert updated_address.state == mock_standardized_data_orig["state"] # Original standardized
+    assert updated_address.city == mock_standardized_data_orig.city # Original standardized
+    assert updated_address.state == mock_standardized_data_orig.state # Original standardized
     assert updated_address.zip == update_data.zip # Updated field
-    assert updated_address.country == mock_standardized_data_orig["country"] # Original standardized
-    assert updated_address.location_key == mock_poem_orig.location_key # Original key
+    assert updated_address.country == mock_standardized_data_orig.country # Original standardized
+    assert updated_address.location_key == mock_standardized_data_orig.location_key # Original key
     assert updated_address.poem_id == mock_poem_orig.id # Original poem ID
 
 @pytest.mark.asyncio
@@ -154,8 +160,11 @@ async def test_update_address_with_regeocode(mock_find_or_create_poem: MagicMock
     address_in = AddressCreate(
         street="1 Old St", city="Old City", state="OS", zip="00001", country="Oldland"
     )
-    mock_standardized_data_orig = {"street": "1 Old St", "city": "Old City", "state": "OS", "zip": "00001", "country": "Oldland"}
-    mock_poem_orig = create_mock_poem(id=5, location_key="old city|oldland", text="Original poem for old city|oldland")
+    location_key_orig = "old city|oldland"
+    mock_standardized_data_orig = StandardizedAddress(
+        street="1 Old St", city="Old City", state="OS", postcode="00001", country="Oldland", location_key=location_key_orig
+    )
+    mock_poem_orig = create_mock_poem(id=5, location_key=location_key_orig, text=f"Original poem for {location_key_orig}")
     mock_geocode_address.return_value = mock_standardized_data_orig
     mock_find_or_create_poem.return_value = mock_poem_orig
     created_address = await crud.address.create_address(db=db, address_in=address_in)
@@ -169,8 +178,11 @@ async def test_update_address_with_regeocode(mock_find_or_create_poem: MagicMock
     update_data = AddressUpdate(city="New City", country="Newland") # Change city/country
 
     # Mock dependencies for the re-geocode and new poem lookup
-    mock_standardized_data_new = {"street": "1 Old St", "city": "New City", "state": "OS", "zip": "00001", "country": "Newland"}
-    mock_poem_new = create_mock_poem(id=6, location_key="new city|newland", text="New poem for new city|newland")
+    location_key_new = "new city|newland"
+    mock_standardized_data_new = StandardizedAddress(
+        street="1 Old St", city="New City", state="OS", postcode="00001", country="Newland", location_key=location_key_new
+    )
+    mock_poem_new = create_mock_poem(id=6, location_key=location_key_new, text=f"New poem for {location_key_new}")
     mock_geocode_address.return_value = mock_standardized_data_new
     mock_find_or_create_poem.return_value = mock_poem_new
 
@@ -191,10 +203,10 @@ async def test_update_address_with_regeocode(mock_find_or_create_poem: MagicMock
     mock_find_or_create_poem.assert_called_once_with(db=db, location_key="new city|newland")
     assert updated_address is not None
     assert updated_address.id == created_address.id
-    assert updated_address.street == mock_standardized_data_new["street"] # Should use new std data
-    assert updated_address.city == mock_standardized_data_new["city"]
-    assert updated_address.country == mock_standardized_data_new["country"]
-    assert updated_address.location_key == mock_poem_new.location_key # New key
+    assert updated_address.street == mock_standardized_data_new.street # Should use new std data
+    assert updated_address.city == mock_standardized_data_new.city
+    assert updated_address.country == mock_standardized_data_new.country
+    assert updated_address.location_key == mock_standardized_data_new.location_key # New key
     assert updated_address.poem_id == mock_poem_new.id # New poem ID
 
 @pytest.mark.asyncio
@@ -206,8 +218,13 @@ async def test_remove_address(mock_find_or_create_poem: MagicMock, mock_geocode_
     address_in = AddressCreate(
         street="999 Delete Dr", city="Removeville", state="RS", zip="99999", country="Removeland"
     )
-    mock_standardized_data = {"street": "999 Std Delete Dr", "city": "Removeville", "state": "RS", "zip": "99999", "country": "Removeland"}
-    mock_poem_obj = create_mock_poem(id=7, location_key="removeville|removeland", text="Mock poem for removeville|removeland")
+    # Mock dependencies for creation
+    location_key = "removeville|removeland"
+    mock_standardized_data = StandardizedAddress(
+        street="999 Std Delete Dr", city="Removeville", state="RS", 
+        postcode="99999", country="Removeland", location_key=location_key
+    )
+    mock_poem_obj = create_mock_poem(id=7, location_key=location_key, text=f"Mock poem for {location_key}")
     mock_geocode_address.return_value = mock_standardized_data
     mock_find_or_create_poem.return_value = mock_poem_obj
     created_address = await crud.address.create_address(db=db, address_in=address_in)
@@ -221,10 +238,10 @@ async def test_remove_address(mock_find_or_create_poem: MagicMock, mock_geocode_
     # Assertions on the returned object (should match created data)
     assert removed_address is not None
     assert removed_address.id == created_id
-    # Check standardized data from creation
-    assert removed_address.street == mock_standardized_data["street"]
-    assert removed_address.city == mock_standardized_data["city"]
-    assert removed_address.location_key == "removeville|removeland"
+    # Check standardized data from creation using the object's attributes
+    assert removed_address.street == mock_standardized_data.street
+    assert removed_address.city == mock_standardized_data.city
+    assert removed_address.location_key == mock_standardized_data.location_key
 
     # Try to retrieve the removed address
     retrieved_after_remove = crud.address.get_address(db=db, id=created_id)
@@ -265,10 +282,11 @@ async def test_create_address_new_poem(
 
     # Mock dependencies
     # 1. Geocoder returns standardized data
-    mock_standardized_data = {
-        "street": "1 Standard Poet Ln", "city": "NewPoemVille", "state": "NP",
-        "zip": "98765", "country": "AgentLand"
-    }
+    location_key = "newpoemville|agentland"
+    mock_standardized_data = StandardizedAddress(
+        street="1 Standard Poet Ln", city="NewPoemVille", state="NP",
+        postcode="98765", country="AgentLand", location_key=location_key
+    )
     mock_geocode_address.return_value = mock_standardized_data
     # 2. DB find returns None (no existing poem)
     mock_find_poem.return_value = None
@@ -282,9 +300,9 @@ async def test_create_address_new_poem(
     assert db_address is not None
     assert db_address.id is not None
     # Check standardized data was used
-    assert db_address.street == mock_standardized_data["street"]
-    assert db_address.city == mock_standardized_data["city"]
-    assert db_address.country == mock_standardized_data["country"]
+    assert db_address.street == mock_standardized_data.street
+    assert db_address.city == mock_standardized_data.city
+    assert db_address.country == mock_standardized_data.country
     # Check derived fields
     assert db_address.location_key == location_key
     assert db_address.poem_id is not None # Should have a new poem ID
@@ -336,10 +354,11 @@ async def test_create_address_existing_poem(
 
     # Mock dependencies
     # 1. Geocoder returns standardized data
-    mock_standardized_data = {
-        "street": "2 Std Existing Rd", "city": "OldPoemTown", "state": "OP",
-        "zip": "11223", "country": "ReuseLand"
-    }
+    location_key = "oldpoemtown|reuseland"
+    mock_standardized_data = StandardizedAddress(
+        street="2 Std Existing Rd", city="OldPoemTown", state="OP",
+        postcode="11223", country="ReuseLand", location_key=location_key
+    )
     mock_geocode_address.return_value = mock_standardized_data
     # 2. DB find returns the existing poem
     mock_find_poem.return_value = existing_poem
@@ -352,8 +371,8 @@ async def test_create_address_existing_poem(
     assert db_address is not None
     assert db_address.id is not None
     # Check standardized data was used
-    assert db_address.street == mock_standardized_data["street"]
-    assert db_address.city == mock_standardized_data["city"]
+    assert db_address.street == mock_standardized_data.street
+    assert db_address.city == mock_standardized_data.city
     # Check derived fields and poem link
     assert db_address.location_key == location_key
     assert db_address.poem_id == existing_poem_id # Check linked to EXISTING poem
